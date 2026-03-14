@@ -4,306 +4,127 @@ import logging
 import akshare as ak
 import pandas as pd
 
-
+# 设置日志
 logger = logging.getLogger(__name__)
 
+# 定义板块类型
 BoardType = Literal["industry", "concept"]
 
-DEFAULT_TOP_K = 3
-DEFAULT_INDUSTRY_LIMIT = 10
-DEFAULT_CONCEPT_LIMIT = 10
+# 设置默认参数
+DEFAULT_TOP_K = 0  # 去掉了固定选 3 个股票的功能
+DEFAULT_INDUSTRY_LIMIT = 5  # 行业板块限制为 5
+DEFAULT_CONCEPT_LIMIT = 5  # 概念板块限制为 5
 
-
+# 安全转换为浮动值
 def safe_float(value, default=0.0) -> float:
     try:
         if value is None:
             return default
         if isinstance(value, str):
             value = value.strip()
-            if value in ("", "-", "--", "None", "nan"):
-                return default
+        if value in ("", "-", "--", "None", "nan"):
+            return default
         return float(value)
-    except Exception:
+    except:
         return default
 
-
-def safe_str(value, default="") -> str:
-    if value is None:
-        return default
-    return str(value).strip()
-
-
-def fetch_with_retry(
-    func: Callable,
-    *args,
-    retries: int = 5,
-    sleep_seconds: float = 2.0,
-    **kwargs,
-):
-    """
-    通用重试包装：
-    - 用于 AKShare 请求不稳定、连接被远端断开时
-    - 最多重试 retries 次
-    """
-    last_error = None
-    for attempt in range(1, retries + 1):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            last_error = e
-            logger.warning(f"[热点板块] 第 {attempt}/{retries} 次请求失败: {e}")
-            if attempt < retries:
-                time.sleep(sleep_seconds)
-            else:
-                raise last_error
-
-
-def normalize_stock_record(row: pd.Series) -> Dict:
-    """
-    把 AKShare 返回的原始字段统一转为标准格式
-    """
-    name = safe_str(row.get("名称", ""))
-    latest_price = safe_float(row.get("最新价", 0))
-
-    return {
-        "code": safe_str(row.get("代码", "")),
-        "name": name,
-        "pct_chg": safe_float(row.get("涨跌幅", 0)),
-        "amount": safe_float(row.get("成交额", 0)),
-        "turnover": safe_float(row.get("换手率", 0)),
-        "latest_price": latest_price,
-        "is_st": "ST" in name.upper(),
-        # 没有明确停牌布尔字段时，做弱判断
-        "is_suspended": latest_price == 0 and safe_float(row.get("涨跌幅", 0)) == 0,
-    }
-
-
-def get_hot_boards(board_type: BoardType = "industry") -> List[Dict]:
-    """
-    获取板块列表（行业 or 概念），按涨跌幅排序
-    """
-    if board_type == "industry":
-        df = fetch_with_retry(ak.stock_board_industry_name_em)
-    elif board_type == "concept":
-        df = fetch_with_retry(ak.stock_board_concept_name_em)
-    else:
-        raise ValueError("board_type 只能是 'industry' 或 'concept'")
-
-    results = []
-    for _, row in df.iterrows():
-        board_name = safe_str(row.get("板块名称", ""))
-        if not board_name:
-            continue
-
-        results.append({
-            "name": board_name,
-            "pct_chg": safe_float(row.get("涨跌幅", 0)),
-            "board_type": board_type,
-        })
-
-    results.sort(key=lambda x: x["pct_chg"], reverse=True)
-    return results
-
-
-def get_board_stocks(board_name: str, board_type: BoardType = "industry") -> List[Dict]:
-    """
-    获取某个板块的成份股
-    """
-    if board_type == "industry":
-        df = fetch_with_retry(ak.stock_board_industry_cons_em, symbol=board_name)
-    elif board_type == "concept":
-        df = fetch_with_retry(ak.stock_board_concept_cons_em, symbol=board_name)
-    else:
-        raise ValueError("board_type 只能是 'industry' 或 'concept'")
-
-    stocks = []
-    for _, row in df.iterrows():
-        stocks.append(normalize_stock_record(row))
-
-    return stocks
-
-
-def pick_top_stocks(board_stocks: List[Dict], top_k: int = 3) -> List[Dict]:
-    """
-    每个板块选 3 只热门股
-    规则：
-    1. 去 ST
-    2. 去停牌
-    3. 按 涨幅 / 成交额 / 换手率 排序
-    """
-    filtered = []
-    for s in board_stocks:
-        if s.get("is_st"):
-            continue
-        if s.get("is_suspended"):
-            continue
-        filtered.append(s)
-
-    ranked = sorted(
-        filtered,
-        key=lambda s: (
-            s.get("pct_chg", 0),
-            s.get("amount", 0),
-            s.get("turnover", 0),
-        ),
-        reverse=True,
-    )
-    return ranked[:top_k]
-
-
+# 获取热门板块报告
 def build_hot_board_report(
-    board_type: BoardType = "industry",
-    stock_top_k: int = DEFAULT_TOP_K,
-    board_limit: int | None = None,
-) -> List[Dict]:
+        stock_top_k: int = DEFAULT_TOP_K,  # 股票推荐数（去掉3只股票功能）
+        include_industry: bool = True,
+        include_concept: bool = True,
+        industry_limit: int = DEFAULT_INDUSTRY_LIMIT,
+        concept_limit: int = DEFAULT_CONCEPT_LIMIT,
+) -> Dict:
     """
-    获取某一类板块（行业/概念）的热点报告
+    获取热门板块数据
+
+    :param stock_top_k: 每个板块推荐的股票数
+    :param include_industry: 是否包含行业板块
+    :param include_concept: 是否包含概念板块
+    :param industry_limit: 行业板块限制数
+    :param concept_limit: 概念板块限制数
+    :return: 热门板块报告
     """
-    hot_boards = get_hot_boards(board_type=board_type)
-
-    if board_limit is not None:
-        hot_boards = hot_boards[:board_limit]
-
-    report = []
-    for board in hot_boards:
-        board_name = board["name"]
-        error_message = ""
-
-        try:
-            board_stocks = get_board_stocks(board_name, board_type=board_type)
-            top_stocks = pick_top_stocks(board_stocks, top_k=stock_top_k)
-        except Exception as e:
-            logger.warning(f"[热点板块] 获取板块 {board_name} 成分股失败: {e}")
-            top_stocks = []
-            error_message = str(e)
-
-        report.append({
-            "board_name": board_name,
-            "board_type": board_type,
-            "board_pct_chg": board.get("pct_chg", 0),
-            "top_stocks": top_stocks,
-            "error": error_message,
-        })
-
-        # 降低请求频率
-        time.sleep(1)
-
-    return report
-
-
-def build_all_boards_report(
-    stock_top_k: int = DEFAULT_TOP_K,
-    include_industry: bool = True,
-    include_concept: bool = True,
-    industry_limit: int | None = DEFAULT_INDUSTRY_LIMIT,
-    concept_limit: int | None = DEFAULT_CONCEPT_LIMIT,
-) -> List[Dict]:
-    """
-    同时获取 行业板块 + 概念板块
-    """
-    final_report = []
-
+    board_report = []
+    
+    # 获取行业板块数据
     if include_industry:
         try:
-            final_report.extend(
-                build_hot_board_report(
-                    board_type="industry",
-                    stock_top_k=stock_top_k,
-                    board_limit=industry_limit,
-                )
-            )
+            industry_data = ak.stock_board_industry_name()
+            industry_data = industry_data.head(industry_limit)  # 获取限制数目的行业板块
+            for _, row in industry_data.iterrows():
+                board_report.append({
+                    "name": row['板块名称'],
+                    "type": "industry",
+                    "pct_chg": row['涨幅'],
+                    "error": None
+                })
         except Exception as e:
-            logger.warning(f"[热点板块] 获取行业板块列表失败: {e}")
-            final_report.append({
-                "board_name": "行业板块列表获取失败",
-                "board_type": "industry",
-                "board_pct_chg": 0,
-                "top_stocks": [],
-                "error": str(e),
-            })
+            logger.warning(f"[行业板块] 获取行业板块失败: {e}")
 
+    # 获取概念板块数据
     if include_concept:
         try:
-            final_report.extend(
-                build_hot_board_report(
-                    board_type="concept",
-                    stock_top_k=stock_top_k,
-                    board_limit=concept_limit,
-                )
-            )
+            concept_data = ak.stock_board_concept_name()
+            concept_data = concept_data.head(concept_limit)  # 获取限制数目的概念板块
+            for _, row in concept_data.iterrows():
+                board_report.append({
+                    "name": row['板块名称'],
+                    "type": "concept",
+                    "pct_chg": row['涨幅'],
+                    "error": None
+                })
         except Exception as e:
-            logger.warning(f"[热点板块] 获取概念板块列表失败: {e}")
-            final_report.append({
-                "board_name": "概念板块列表获取失败",
-                "board_type": "concept",
-                "board_pct_chg": 0,
-                "top_stocks": [],
-                "error": str(e),
-            })
+            logger.warning(f"[概念板块] 获取概念板块失败: {e}")
 
-    return final_report
+    return board_report
 
 
-def _format_single_section(title: str, boards: List[Dict]) -> List[str]:
-    lines = [f"## {title}"]
-
-    if not boards:
-        lines.append("- 暂无数据")
-        return lines
-
-    for idx, board in enumerate(boards, start=1):
-        lines.append(
-            f"{idx}. {board['board_name']} | 涨幅: {board['board_pct_chg']:.2f}%"
-        )
-
-        if board.get("error"):
-            lines.append(f"   - 成分股获取失败: {board['error']}")
-            continue
-
-        top_stocks = board.get("top_stocks", [])
-        if not top_stocks:
-            lines.append("   - 暂无可用成份股")
-            continue
-
-        for stock in top_stocks[:3]:
-            lines.append(
-                f"   - {stock['name']}({stock['code']}) "
-                f"涨幅:{stock['pct_chg']:.2f}% "
-                f"成交额:{stock['amount']:.0f} "
-                f"换手率:{stock['turnover']:.2f}%"
-            )
-
-    return lines
-
-
-def format_report_text(report: List[Dict]) -> str:
+# 格式化报告文本
+def format_report_text(board_report: List[Dict]) -> str:
     """
-    输出为邮件/日志可直接使用的文本
+    格式化报告文本
+
+    :param board_report: 热门板块报告
+    :return: 格式化后的报告文本
     """
-    industry_boards = [x for x in report if x.get("board_type") == "industry"]
-    concept_boards = [x for x in report if x.get("board_type") == "concept"]
-
-    # 各自按涨幅排序
-    industry_boards = sorted(industry_boards, key=lambda x: x.get("board_pct_chg", 0), reverse=True)
-    concept_boards = sorted(concept_boards, key=lambda x: x.get("board_pct_chg", 0), reverse=True)
-
     lines = []
-    lines.append("# 🔥 A股热点板块追踪")
-    lines.append("")
-    lines.extend(_format_single_section("行业板块 TOP 10（每板块最多 3 只）", industry_boards[:10]))
-    lines.append("")
-    lines.extend(_format_single_section("概念板块 TOP 10（每板块最多 3 只）", concept_boards[:10]))
-
+    for board in board_report:
+        lines.append(f"## {board['name']} ({board['type']})")
+        lines.append(f"涨幅: {board['pct_chg']:.2f}%")
+        lines.append("")
     return "\n".join(lines)
 
 
-if __name__ == "__main__":
-    report = build_all_boards_report(
-        stock_top_k=3,
-        include_industry=True,
-        include_concept=True,
-        industry_limit=10,
-        concept_limit=10,
-    )
+# 主函数
+def main() -> int:
+    """
+    主入口函数
 
-    print(format_report_text(report))
+    Returns:
+        退出码（0 表示成功）
+    """
+    # 定义报告的基本格式
+    hot_board_text = ""
+    try:
+        board_report = build_hot_board_report(
+            stock_top_k=0,  # 去掉推荐 3 只股票的功能
+            include_industry=True,
+            include_concept=True,
+            industry_limit=DEFAULT_INDUSTRY_LIMIT,
+            concept_limit=DEFAULT_CONCEPT_LIMIT,
+        )
+        hot_board_text = format_report_text(board_report)
+        logger.info("\n" + hot_board_text)
+    except Exception as e:
+        hot_board_text = f"🔥 热点板块分析失败\n\n错误信息：{e}"
+        logger.warning(f"热门板块分析失败，已跳过: {e}")
+    
+    # 创建快照
+    save_context_snapshot = None
+    return 0
+
+
+if __name__ == "__main__":
+    main()
