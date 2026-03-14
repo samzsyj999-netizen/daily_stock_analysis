@@ -262,7 +262,10 @@ def run_full_analysis(
     """
     执行完整的分析流程（个股 + 大盘复盘）
 
-    这是定时任务调用的主函数
+    统一在最后发送一封汇总邮件：
+    1. 热点板块
+    2. 个股日报
+    3. 大盘复盘
     """
     try:
         # Issue #529: Hot-reload STOCK_LIST from .env on each scheduled run
@@ -288,13 +291,23 @@ def run_full_analysis(
         if getattr(args, 'single_notify', False):
             config.single_stock_notify = True
 
-        # Issue #190: 个股与大盘复盘合并推送
-        merge_notification = (
-            getattr(config, 'merge_email_notification', False)
-            and config.market_review_enabled
-            and not getattr(args, 'no_market_review', False)
-            and not config.single_stock_notify
-        )
+        # =========================
+        # 1) 先抓热点板块（优先级最高）
+        # =========================
+        hot_board_text = ""
+        try:
+            board_report = build_all_boards_report(
+                stock_top_k=3,
+                include_industry=True,
+                include_concept=True,
+                industry_limit=10,
+                concept_limit=10,
+            )
+            hot_board_text = format_report_text(board_report)
+            logger.info("\n" + hot_board_text)
+        except Exception as e:
+            hot_board_text = f"# 🔥 A股热点板块追踪\n\n获取失败：{e}"
+            logger.warning(f"热点板块分析失败，但仍会继续主流程: {e}")
 
         # 创建调度器
         save_context_snapshot = None
@@ -309,15 +322,17 @@ def run_full_analysis(
             save_context_snapshot=save_context_snapshot
         )
 
-        # 1. 运行个股分析
+        # =========================
+        # 2) 个股分析：关闭中途通知
+        # =========================
         results = pipeline.run(
             stock_codes=stock_codes,
             dry_run=args.dry_run,
-            send_notification=not args.no_notify,
-            merge_notification=merge_notification
+            send_notification=False,   # 关闭中途自动通知
+            merge_notification=False   # 统一最后再发
         )
 
-        # Issue #128: 分析间隔 - 在个股分析和大盘分析之间添加延迟
+        # Issue #128: 分析间隔
         analysis_delay = getattr(config, 'analysis_delay', 0)
         if (
             analysis_delay > 0
@@ -328,7 +343,9 @@ def run_full_analysis(
             logger.info(f"等待 {analysis_delay} 秒后执行大盘复盘（避免API限流）...")
             time.sleep(analysis_delay)
 
-        # 2. 运行大盘复盘（如果启用且不是仅个股模式）
+        # =========================
+        # 3) 大盘复盘：也关闭中途通知
+        # =========================
         market_report = ""
         if (
             config.market_review_enabled
@@ -339,32 +356,50 @@ def run_full_analysis(
                 notifier=pipeline.notifier,
                 analyzer=pipeline.analyzer,
                 search_service=pipeline.search_service,
-                send_notification=not args.no_notify,
-                merge_notification=merge_notification,
+                send_notification=False,   # 关闭中途自动通知
+                merge_notification=False,  # 统一最后再发
                 override_region=effective_region,
             )
-            # 如果有结果，赋值给 market_report 用于后续飞书文档生成
             if review_result:
                 market_report = review_result
 
-        # Issue #190: 合并推送（个股+大盘复盘）
-        if merge_notification and (results or market_report) and not args.no_notify:
-            parts = []
-            if market_report:
-                parts.append(f"# 📈 大盘复盘\n\n{market_report}")
-            if results:
-                dashboard_content = pipeline.notifier.generate_aggregate_report(
-                    results,
-                    getattr(config, 'report_type', 'simple'),
-                )
-                parts.append(f"# 🚀 个股决策仪表盘\n\n{dashboard_content}")
-            if parts:
-                combined_content = "\n\n---\n\n".join(parts)
-                if pipeline.notifier.is_available():
-                    if pipeline.notifier.send(combined_content, email_send_to_all=True):
-                        logger.info("已合并推送（个股+大盘复盘）")
-                    else:
-                        logger.warning("合并推送失败")
+        # =========================
+        # 4) 生成个股日报正文
+        # =========================
+        dashboard_content = ""
+        if results:
+            dashboard_content = pipeline.notifier.generate_aggregate_report(
+                results,
+                getattr(config, 'report_type', 'simple'),
+            )
+
+        # =========================
+        # 5) 统一组装最终邮件正文
+        # =========================
+        parts = []
+
+        if hot_board_text:
+            parts.append(hot_board_text)
+
+        if dashboard_content:
+            parts.append(f"# 🚀 个股决策仪表盘\n\n{dashboard_content}")
+
+        if market_report:
+            parts.append(f"# 📈 大盘复盘\n\n{market_report}")
+
+        final_email_content = "\n\n---\n\n".join(parts).strip()
+
+        # =========================
+        # 6) 统一发送最终邮件
+        # =========================
+        if final_email_content and not args.no_notify:
+            if pipeline.notifier.is_available():
+                if pipeline.notifier.send(final_email_content, email_send_to_all=True):
+                    logger.info("统一汇总邮件发送成功（已包含热点板块）")
+                else:
+                    logger.warning("统一汇总邮件发送失败")
+            else:
+                logger.warning("通知器不可用，无法发送统一汇总邮件")
 
         # 输出摘要
         if results:
@@ -378,41 +413,25 @@ def run_full_analysis(
 
         logger.info("\n任务执行完成")
 
-        # === 新增：生成飞书云文档 ===
+        # === 生成飞书云文档（可保留）===
         try:
             from src.feishu_doc import FeishuDocManager
 
             feishu_doc = FeishuDocManager()
-            if feishu_doc.is_configured() and (results or market_report):
+            if feishu_doc.is_configured() and final_email_content:
                 logger.info("正在创建飞书云文档...")
 
-                # 1. 准备标题 "01-01 13:01大盘复盘"
                 tz_cn = timezone(timedelta(hours=8))
                 now = datetime.now(tz_cn)
                 doc_title = f"{now.strftime('%Y-%m-%d %H:%M')} 大盘复盘"
 
-                # 2. 准备内容 (拼接个股分析和大盘复盘)
-                full_content = ""
-
-                # 添加大盘复盘内容（如果有）
-                if market_report:
-                    full_content += f"# 📈 大盘复盘\n\n{market_report}\n\n---\n\n"
-
-                # 添加个股决策仪表盘（使用 NotificationService 生成，按 report_type 分支）
-                if results:
-                    dashboard_content = pipeline.notifier.generate_aggregate_report(
-                        results,
-                        getattr(config, 'report_type', 'simple'),
-                    )
-                    full_content += f"# 🚀 个股决策仪表盘\n\n{dashboard_content}"
-
-                # 3. 创建文档
-                doc_url = feishu_doc.create_daily_doc(doc_title, full_content)
+                doc_url = feishu_doc.create_daily_doc(doc_title, final_email_content)
                 if doc_url:
                     logger.info(f"飞书云文档创建成功: {doc_url}")
-                    # 可选：将文档链接也推送到群里
                     if not args.no_notify:
-                        pipeline.notifier.send(f"[{now.strftime('%Y-%m-%d %H:%M')}] 复盘文档创建成功: {doc_url}")
+                        pipeline.notifier.send(
+                            f"[{now.strftime('%Y-%m-%d %H:%M')}] 复盘文档创建成功: {doc_url}"
+                        )
 
         except Exception as e:
             logger.error(f"飞书文档生成失败: {e}")
@@ -439,7 +458,6 @@ def run_full_analysis(
 
     except Exception as e:
         logger.exception(f"分析流程执行失败: {e}")
-
 
 def start_api_server(host: str, port: int, config: Config) -> None:
     """
@@ -526,19 +544,6 @@ def main() -> int:
         debug=args.debug,
         log_dir=config.log_dir,
     )
-
-    try:
-        board_report = build_all_boards_report(
-            stock_top_k=3,
-            include_industry=True,
-            include_concept=True,
-            industry_limit=10,
-            concept_limit=10,
-        )
-        board_text = format_report_text(board_report)
-        logger.info("\n" + board_text)
-    except Exception as e:
-        logger.warning(f"热门板块分析失败，已跳过: {e}")
 
     logger.info("=" * 60)
     logger.info("A股自选股智能分析系统 启动")
