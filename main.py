@@ -300,8 +300,8 @@ def run_full_analysis(
                 stock_top_k=3,
                 include_industry=True,
                 include_concept=True,
-                industry_limit=10,
-                concept_limit=10,
+                industry_limit=5,
+                concept_limit=5,
             )
             hot_board_text = format_report_text(board_report)
             logger.info("\n" + hot_board_text)
