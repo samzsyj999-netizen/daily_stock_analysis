@@ -22,7 +22,7 @@ A股自选股智能分析系统 - 主调度程序
 - 买点偏好：缩量回踩 MA5/MA10 支撑
 """
 import os
-from src.config import setup_env
+from hot_board_analysis import build_all_boards_report, format_report_text
 setup_env()
 
 # 代理配置 - 通过 USE_PROXY 环境变量控制，默认关闭
@@ -522,6 +522,16 @@ def main() -> int:
 
     # 配置日志（输出到控制台和文件）
     setup_logging(log_prefix="stock_analysis", debug=args.debug, log_dir=config.log_dir)
+    board_report = build_all_boards_report(
+    stock_top_k=3,
+    include_industry=True,
+    include_concept=True,
+    industry_limit=10,
+    concept_limit=10,
+)
+
+board_text = format_report_text(board_report)
+logger.info("\n" + board_text)
 
     logger.info("=" * 60)
     logger.info("A股自选股智能分析系统 启动")
