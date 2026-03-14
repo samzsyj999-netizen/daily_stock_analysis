@@ -23,7 +23,6 @@ A股自选股智能分析系统 - 主调度程序
 """
 import os
 from hot_board_analysis import build_all_boards_report, format_report_text
-# setup_env()
 
 # 代理配置 - 通过 USE_PROXY 环境变量控制，默认关闭
 # GitHub Actions 环境自动跳过代理配置
@@ -445,7 +444,7 @@ def run_full_analysis(
 def start_api_server(host: str, port: int, config: Config) -> None:
     """
     在后台线程启动 FastAPI 服务
-    
+
     Args:
         host: 监听地址
         port: 监听端口
@@ -473,6 +472,7 @@ def _is_truthy_env(var_name: str, default: str = "true") -> bool:
     """Parse common truthy / falsy environment values."""
     value = os.getenv(var_name, default).strip().lower()
     return value not in {"0", "false", "no", "off"}
+
 
 def start_bot_stream_clients(config: Config) -> None:
     """Start bot stream clients when enabled in config."""
@@ -527,16 +527,19 @@ def main() -> int:
         log_dir=config.log_dir,
     )
 
-    board_report = build_all_boards_report(
-        stock_top_k=3,
-        include_industry=True,
-        include_concept=True,
-        industry_limit=3,
-        concept_limit=3,
-    )
+    try:
+        board_report = build_all_boards_report(
+            stock_top_k=3,
+            include_industry=True,
+            include_concept=False,
+            industry_limit=3,
+            concept_limit=0,
+        )
+        board_text = format_report_text(board_report)
+        logger.info("\n" + board_text)
+    except Exception as e:
+        logger.warning(f"热门板块分析失败，已跳过: {e}")
 
-    board_text = format_report_text(board_report)
-    logger.info("\n" + board_text)
     logger.info("=" * 60)
     logger.info("A股自选股智能分析系统 启动")
     logger.info(f"运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
