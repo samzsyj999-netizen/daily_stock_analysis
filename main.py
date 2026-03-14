@@ -297,7 +297,6 @@ def run_full_analysis(
         hot_board_text = ""
         try:
             board_report = build_all_boards_report(
-                stock_top_k=3,
                 include_industry=True,
                 include_concept=True,
                 industry_limit=5,
