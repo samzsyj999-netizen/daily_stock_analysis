@@ -531,8 +531,8 @@ def main() -> int:
         stock_top_k=3,
         include_industry=True,
         include_concept=True,
-        industry_limit=10,
-        concept_limit=10,
+        industry_limit=3,
+        concept_limit=3,
     )
 
     board_text = format_report_text(board_report)
