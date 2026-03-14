@@ -23,7 +23,7 @@ A股自选股智能分析系统 - 主调度程序
 """
 import os
 from hot_board_analysis import build_all_boards_report, format_report_text
-setup_env()
+# setup_env()
 
 # 代理配置 - 通过 USE_PROXY 环境变量控制，默认关闭
 # GitHub Actions 环境自动跳过代理配置
