@@ -22,12 +22,12 @@ A股自选股智能分析系统 - 主调度程序
 - 买点偏好：缩量回踩 MA5/MA10 支撑
 """
 import os
+
 from hot_board_analysis import build_all_boards_report, format_report_text
 
 # 代理配置 - 通过 USE_PROXY 环境变量控制，默认关闭
 # GitHub Actions 环境自动跳过代理配置
 if os.getenv("GITHUB_ACTIONS") != "true" and os.getenv("USE_PROXY", "false").lower() == "true":
-    # 本地开发环境，启用代理（可在 .env 中配置 PROXY_HOST 和 PROXY_PORT）
     proxy_host = os.getenv("PROXY_HOST", "127.0.0.1")
     proxy_port = os.getenv("PROXY_PORT", "10809")
     proxy_url = f"http://{proxy_host}:{proxy_port}"
@@ -218,7 +218,7 @@ def _compute_trading_day_filter(
     stock_codes: List[str],
 ) -> Tuple[List[str], Optional[str], bool]:
     """
-    Compute filtered stock list and effective market review region (Issue #373).
+    Compute filtered stock list and effective market review region.
 
     Returns:
         (filtered_codes, effective_region, should_skip_all)
@@ -260,47 +260,44 @@ def run_full_analysis(
     stock_codes: Optional[List[str]] = None
 ):
     """
-    执行完整的分析流程（个股 + 大盘复盘）
-
-    统一在最后发送一封汇总邮件：
-    1. 热点板块
-    2. 个股日报
-    3. 大盘复盘
+    执行完整的分析流程（热点板块 + 个股 + 大盘复盘）
+    最后统一发送一封汇总邮件
     """
     try:
-        # Issue #529: Hot-reload STOCK_LIST from .env on each scheduled run
+        # Hot reload STOCK_LIST
         if stock_codes is None:
             config.refresh_stock_list()
 
-        # Issue #373: Trading day filter (per-stock, per-market)
+        # 交易日过滤
         effective_codes = stock_codes if stock_codes is not None else config.stock_list
         filtered_codes, effective_region, should_skip = _compute_trading_day_filter(
             config, args, effective_codes
         )
+
         if should_skip:
-            logger.info(
-                "今日所有相关市场均为非交易日，跳过执行。可使用 --force-run 强制执行。"
-            )
+            logger.info("今日所有相关市场均为非交易日，跳过执行。可使用 --force-run 强制执行。")
             return
+
         if set(filtered_codes) != set(effective_codes):
             skipped = set(effective_codes) - set(filtered_codes)
             logger.info("今日休市股票已跳过: %s", skipped)
+
         stock_codes = filtered_codes
 
-        # 命令行参数 --single-notify 覆盖配置（#55）
+        # 单股推送参数覆盖配置
         if getattr(args, 'single_notify', False):
             config.single_stock_notify = True
 
         # =========================
-        # 1) 先抓热点板块（优先级最高）
+        # 1) 先抓热点板块 Top 3
         # =========================
         hot_board_text = ""
         try:
             board_report = build_all_boards_report(
                 include_industry=True,
                 include_concept=True,
-                industry_limit=5,
-                concept_limit=5,
+                industry_limit=3,
+                concept_limit=3,
             )
             hot_board_text = format_report_text(board_report)
             logger.info("\n" + hot_board_text)
@@ -312,6 +309,7 @@ def run_full_analysis(
         save_context_snapshot = None
         if getattr(args, 'no_context_snapshot', False):
             save_context_snapshot = False
+
         query_id = uuid.uuid4().hex
         pipeline = StockAnalysisPipeline(
             config=config,
@@ -322,16 +320,17 @@ def run_full_analysis(
         )
 
         # =========================
-        # 2) 个股分析：关闭中途通知
+        # 2) 个股分析（保留）
+        #    关闭中途通知，最后统一发
         # =========================
         results = pipeline.run(
             stock_codes=stock_codes,
             dry_run=args.dry_run,
-            send_notification=False,   # 关闭中途自动通知
-            merge_notification=False   # 统一最后再发
+            send_notification=False,
+            merge_notification=False
         )
 
-        # Issue #128: 分析间隔
+        # 个股与大盘之间等待
         analysis_delay = getattr(config, 'analysis_delay', 0)
         if (
             analysis_delay > 0
@@ -343,7 +342,8 @@ def run_full_analysis(
             time.sleep(analysis_delay)
 
         # =========================
-        # 3) 大盘复盘：也关闭中途通知
+        # 3) 大盘复盘（保留）
+        #    关闭中途通知，最后统一发
         # =========================
         market_report = ""
         if (
@@ -355,15 +355,15 @@ def run_full_analysis(
                 notifier=pipeline.notifier,
                 analyzer=pipeline.analyzer,
                 search_service=pipeline.search_service,
-                send_notification=False,   # 关闭中途自动通知
-                merge_notification=False,  # 统一最后再发
+                send_notification=False,
+                merge_notification=False,
                 override_region=effective_region,
             )
             if review_result:
                 market_report = review_result
 
         # =========================
-        # 4) 生成个股日报正文
+        # 4) 生成个股仪表盘正文
         # =========================
         dashboard_content = ""
         if results:
@@ -373,7 +373,7 @@ def run_full_analysis(
             )
 
         # =========================
-        # 5) 统一组装最终邮件正文
+        # 5) 合并最终邮件正文
         # =========================
         parts = []
 
@@ -394,7 +394,7 @@ def run_full_analysis(
         if final_email_content and not args.no_notify:
             if pipeline.notifier.is_available():
                 if pipeline.notifier.send(final_email_content, email_send_to_all=True):
-                    logger.info("统一汇总邮件发送成功（已包含热点板块）")
+                    logger.info("统一汇总邮件发送成功（包含热点板块Top3 + 个股 + 大盘复盘）")
                 else:
                     logger.warning("统一汇总邮件发送失败")
             else:
@@ -412,7 +412,7 @@ def run_full_analysis(
 
         logger.info("\n任务执行完成")
 
-        # === 生成飞书云文档（可保留）===
+        # === 可选：生成飞书云文档 ===
         try:
             from src.feishu_doc import FeishuDocManager
 
@@ -431,11 +431,10 @@ def run_full_analysis(
                         pipeline.notifier.send(
                             f"[{now.strftime('%Y-%m-%d %H:%M')}] 复盘文档创建成功: {doc_url}"
                         )
-
         except Exception as e:
             logger.error(f"飞书文档生成失败: {e}")
 
-        # === Auto backtest ===
+        # === 自动回测 ===
         try:
             if getattr(config, 'backtest_enabled', False):
                 from src.services.backtest_service import BacktestService
@@ -450,7 +449,8 @@ def run_full_analysis(
                 )
                 logger.info(
                     f"自动回测完成: processed={stats.get('processed')} saved={stats.get('saved')} "
-                    f"completed={stats.get('completed')} insufficient={stats.get('insufficient')} errors={stats.get('errors')}"
+                    f"completed={stats.get('completed')} insufficient={stats.get('insufficient')} "
+                    f"errors={stats.get('errors')}"
                 )
         except Exception as e:
             logger.warning(f"自动回测失败（已忽略）: {e}")
@@ -458,14 +458,10 @@ def run_full_analysis(
     except Exception as e:
         logger.exception(f"分析流程执行失败: {e}")
 
+
 def start_api_server(host: str, port: int, config: Config) -> None:
     """
     在后台线程启动 FastAPI 服务
-
-    Args:
-        host: 监听地址
-        port: 监听端口
-        config: 配置对象
     """
     import threading
     import uvicorn
@@ -493,7 +489,6 @@ def _is_truthy_env(var_name: str, default: str = "true") -> bool:
 
 def start_bot_stream_clients(config: Config) -> None:
     """Start bot stream clients when enabled in config."""
-    # 启动钉钉 Stream 客户端
     if config.dingtalk_stream_enabled:
         try:
             from bot.platforms import start_dingtalk_stream_background, DINGTALK_STREAM_AVAILABLE
@@ -508,7 +503,6 @@ def start_bot_stream_clients(config: Config) -> None:
         except Exception as exc:
             logger.error(f"[Main] Failed to start Dingtalk Stream client: {exc}")
 
-    # 启动飞书 Stream 客户端
     if getattr(config, 'feishu_stream_enabled', False):
         try:
             from bot.platforms import start_feishu_stream_background, FEISHU_SDK_AVAILABLE
@@ -527,17 +521,10 @@ def start_bot_stream_clients(config: Config) -> None:
 def main() -> int:
     """
     主入口函数
-
-    Returns:
-        退出码（0 表示成功）
     """
-    # 解析命令行参数
     args = parse_arguments()
-
-    # 加载配置（在设置日志前加载，以获取日志目录）
     config = get_config()
 
-    # 配置日志（输出到控制台和文件）
     setup_logging(
         log_prefix="stock_analysis",
         debug=args.debug,
@@ -554,26 +541,24 @@ def main() -> int:
     for warning in warnings:
         logger.warning(warning)
 
-    # 解析股票列表（统一为大写 Issue #355）
+    # 解析股票列表
     stock_codes = None
     if args.stocks:
         stock_codes = [canonical_stock_code(c) for c in args.stocks.split(',') if (c or "").strip()]
         logger.info(f"使用命令行指定的股票列表: {stock_codes}")
 
-    # === 处理 --webui / --webui-only 参数，映射到 --serve / --serve-only ===
+    # WebUI 参数映射
     if args.webui:
         args.serve = True
     if args.webui_only:
         args.serve_only = True
 
-    # 兼容旧版 WEBUI_ENABLED 环境变量
     if config.webui_enabled and not (args.serve or args.serve_only):
         args.serve = True
 
-    # === 启动 Web 服务 (如果启用) ===
+    # 启动 Web 服务（如果启用）
     start_serve = (args.serve or args.serve_only) and os.getenv("GITHUB_ACTIONS") != "true"
 
-    # 兼容旧版 WEBUI_HOST/WEBUI_PORT：如果用户未通过 --host/--port 指定，则使用旧变量
     if start_serve:
         if args.host == '0.0.0.0' and os.getenv('WEBUI_HOST'):
             args.host = os.getenv('WEBUI_HOST')
@@ -593,7 +578,7 @@ def main() -> int:
     if bot_clients_started:
         start_bot_stream_clients(config)
 
-    # === 仅 Web 服务模式：不自动执行分析 ===
+    # 仅 Web 服务模式
     if args.serve_only:
         logger.info("模式: 仅 Web 服务")
         logger.info(f"Web 服务运行中: http://{args.host}:{args.port}")
@@ -628,14 +613,9 @@ def main() -> int:
         # 模式1: 仅大盘复盘
         if args.market_review:
             from src.analyzer import GeminiAnalyzer
-            from src.core.market_review import run_market_review
             from src.notification import NotificationService
             from src.search_service import SearchService
 
-            # Issue #373: Trading day check for market-review-only mode.
-            # Do NOT use _compute_trading_day_filter here: that helper checks
-            # config.market_review_enabled, which would wrongly block an
-            # explicit --market-review invocation when the flag is disabled.
             effective_region = None
             if not getattr(args, 'force_run', False) and getattr(config, 'trading_day_check_enabled', True):
                 from src.core.trading_calendar import get_open_markets_today, compute_effective_region as _compute_region
@@ -650,7 +630,6 @@ def main() -> int:
             logger.info("模式: 仅大盘复盘")
             notifier = NotificationService()
 
-            # 初始化搜索服务和分析器（如果有配置）
             search_service = None
             analyzer = None
 
@@ -687,9 +666,6 @@ def main() -> int:
             logger.info("模式: 定时任务")
             logger.info(f"每日执行时间: {config.schedule_time}")
 
-            # Determine whether to run immediately:
-            # Command line arg --no-run-immediately overrides config if present.
-            # Otherwise use config (defaults to True).
             should_run_immediately = config.schedule_run_immediately
             if getattr(args, 'no_run_immediately', False):
                 should_run_immediately = False
@@ -716,7 +692,6 @@ def main() -> int:
 
         logger.info("\n程序执行完成")
 
-        # 如果启用了服务且是非定时任务模式，保持程序运行
         keep_running = start_serve and not (args.schedule or config.schedule_enabled)
         if keep_running:
             logger.info("API 服务运行中 (按 Ctrl+C 退出)...")
