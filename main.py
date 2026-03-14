@@ -521,18 +521,22 @@ def main() -> int:
     config = get_config()
 
     # 配置日志（输出到控制台和文件）
-    setup_logging(log_prefix="stock_analysis", debug=args.debug, log_dir=config.log_dir)
+    setup_logging(
+        log_prefix="stock_analysis",
+        debug=args.debug,
+        log_dir=config.log_dir,
+    )
+
     board_report = build_all_boards_report(
-    stock_top_k=3,
-    include_industry=True,
-    include_concept=True,
-    industry_limit=10,
-    concept_limit=10,
-)
+        stock_top_k=3,
+        include_industry=True,
+        include_concept=True,
+        industry_limit=10,
+        concept_limit=10,
+    )
 
-board_text = format_report_text(board_report)
-logger.info("\n" + board_text)
-
+    board_text = format_report_text(board_report)
+    logger.info("\n" + board_text)
     logger.info("=" * 60)
     logger.info("A股自选股智能分析系统 启动")
     logger.info(f"运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
