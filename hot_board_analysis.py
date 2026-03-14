@@ -1,4 +1,5 @@
-from typing import List, Dict, Literal
+from typing import List, Dict, Literal, Callable
+import time
 import akshare as ak
 import pandas as pd
 
@@ -28,41 +29,74 @@ def safe_str(value, default="") -> str:
     return str(value).strip()
 
 
+def fetch_with_retry(
+    func: Callable,
+    *args,
+    retries: int = 3,
+    sleep_seconds: float = 1.5,
+    **kwargs,
+):
+    """
+    通用重试包装：
+    - 适用于 AKShare 请求不稳定、连接被远端断开时
+    - 最多重试 retries 次
+    """
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            last_error = e
+            if attempt < retries:
+                print(f"[WARN] 第 {attempt}/{retries} 次请求失败，{sleep_seconds} 秒后重试: {e}")
+                time.sleep(sleep_seconds)
+            else:
+                raise last_error
+
+
 def normalize_stock_record(row: pd.Series) -> Dict:
     """
-    把 AKShare 返回的原始字段，统一转成你自己的标准字段格式
+    把 AKShare 返回的原始字段，统一转成标准字段格式
     """
     name = safe_str(row.get("名称", ""))
+    latest_price = safe_float(row.get("最新价", 0))
+
     return {
         "code": safe_str(row.get("代码", "")),
         "name": name,
         "pct_chg": safe_float(row.get("涨跌幅", 0)),
         "amount": safe_float(row.get("成交额", 0)),
         "turnover": safe_float(row.get("换手率", 0)),
+        "latest_price": latest_price,
         "is_st": "ST" in name.upper(),
-        "is_suspended": False,   # 东方财富这个成份股接口一般不给停牌布尔字段，这里先默认 False
+        # 这里没有官方停牌布尔字段时，用“最新价为0且涨跌幅也为空/0”的弱判断
+        "is_suspended": latest_price == 0 and safe_float(row.get("涨跌幅", 0)) == 0,
     }
 
 
 def get_hot_boards(board_type: BoardType = "industry") -> List[Dict]:
     """
-    获取所有热门板块（行业 or 概念），并返回统一格式：
+    获取热门板块（行业 or 概念），并返回统一格式：
     [
         {"name": "机器人", "pct_chg": 4.8, "board_type": "concept"},
         ...
     ]
     """
     if board_type == "industry":
-        df = ak.stock_board_industry_name_em()
+        df = fetch_with_retry(ak.stock_board_industry_name_em)
     elif board_type == "concept":
-        df = ak.stock_board_concept_name_em()
+        df = fetch_with_retry(ak.stock_board_concept_name_em)
     else:
         raise ValueError("board_type 只能是 'industry' 或 'concept'")
 
     results = []
     for _, row in df.iterrows():
+        board_name = safe_str(row.get("板块名称", ""))
+        if not board_name:
+            continue
+
         results.append({
-            "name": safe_str(row.get("板块名称", "")),
+            "name": board_name,
             "pct_chg": safe_float(row.get("涨跌幅", 0)),
             "board_type": board_type,
         })
@@ -77,9 +111,9 @@ def get_board_stocks(board_name: str, board_type: BoardType = "industry") -> Lis
     获取某个板块的成份股，并转成统一格式
     """
     if board_type == "industry":
-        df = ak.stock_board_industry_cons_em(symbol=board_name)
+        df = fetch_with_retry(ak.stock_board_industry_cons_em, symbol=board_name)
     elif board_type == "concept":
-        df = ak.stock_board_concept_cons_em(symbol=board_name)
+        df = fetch_with_retry(ak.stock_board_concept_cons_em, symbol=board_name)
     else:
         raise ValueError("board_type 只能是 'industry' 或 'concept'")
 
@@ -138,8 +172,13 @@ def build_hot_board_report(
     report = []
     for board in hot_boards:
         board_name = board["name"]
-        board_stocks = get_board_stocks(board_name, board_type=board_type)
-        top_stocks = pick_top_stocks(board_stocks, top_k=stock_top_k)
+
+        try:
+            board_stocks = get_board_stocks(board_name, board_type=board_type)
+            top_stocks = pick_top_stocks(board_stocks, top_k=stock_top_k)
+        except Exception as e:
+            print(f"[WARN] 获取板块 {board_name} 成分股失败: {e}")
+            top_stocks = []
 
         report.append({
             "board_name": board_name,
@@ -147,6 +186,9 @@ def build_hot_board_report(
             "board_pct_chg": board.get("pct_chg", 0),
             "top_stocks": top_stocks,
         })
+
+        # 降低请求频率，减少远端断开连接概率
+        time.sleep(1)
 
     return report
 
@@ -164,22 +206,28 @@ def build_all_boards_report(
     final_report = []
 
     if include_industry:
-        final_report.extend(
-            build_hot_board_report(
-                board_type="industry",
-                stock_top_k=stock_top_k,
-                board_limit=industry_limit,
+        try:
+            final_report.extend(
+                build_hot_board_report(
+                    board_type="industry",
+                    stock_top_k=stock_top_k,
+                    board_limit=industry_limit,
+                )
             )
-        )
+        except Exception as e:
+            print(f"[WARN] 获取行业板块失败: {e}")
 
     if include_concept:
-        final_report.extend(
-            build_hot_board_report(
-                board_type="concept",
-                stock_top_k=stock_top_k,
-                board_limit=concept_limit,
+        try:
+            final_report.extend(
+                build_hot_board_report(
+                    board_type="concept",
+                    stock_top_k=stock_top_k,
+                    board_limit=concept_limit,
+                )
             )
-        )
+        except Exception as e:
+            print(f"[WARN] 获取概念板块失败: {e}")
 
     # 全部板块按板块涨幅再排一次
     final_report.sort(key=lambda x: x.get("board_pct_chg", 0), reverse=True)
@@ -192,6 +240,10 @@ def format_report_text(report: List[Dict]) -> str:
     """
     lines = []
     lines.append("=== A股热门板块分析 ===")
+
+    if not report:
+        lines.append("暂无可用板块数据")
+        return "\n".join(lines)
 
     for idx, board in enumerate(report, start=1):
         lines.append(
@@ -216,19 +268,13 @@ def format_report_text(report: List[Dict]) -> str:
 
 
 if __name__ == "__main__":
-    # 方案1：只看行业板块
-    # report = build_hot_board_report(board_type="industry", stock_top_k=3)
-
-    # 方案2：只看概念板块
-    # report = build_hot_board_report(board_type="concept", stock_top_k=3)
-
-    # 方案3：行业+概念一起看
+    # 为了更稳定，默认先只抓行业板块前 3 个
     report = build_all_boards_report(
         stock_top_k=3,
         include_industry=True,
-        include_concept=True,
-        industry_limit=None,   # None = 不限制板块数量
-        concept_limit=None,    # None = 不限制板块数量
+        include_concept=False,
+        industry_limit=3,
+        concept_limit=0,
     )
 
     text = format_report_text(report)
