@@ -531,9 +531,9 @@ def main() -> int:
         board_report = build_all_boards_report(
             stock_top_k=3,
             include_industry=True,
-            include_concept=False,
-            industry_limit=3,
-            concept_limit=0,
+            include_concept=True,
+            industry_limit=10,
+            concept_limit=10,
         )
         board_text = format_report_text(board_report)
         logger.info("\n" + board_text)
